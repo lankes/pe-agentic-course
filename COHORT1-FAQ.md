@@ -129,72 +129,35 @@ Correct — `requirements.txt` was missing from the root of the repo. It has bee
 
 **Asked by:** Kevin
 
-Each gate in `quality-gates.json` has three fields that control its behaviour: a `metric` (what gets measured), a `threshold` (the value it's compared against), and an `operator` (the direction of comparison). A gate **passes** when `metric <operator> threshold` is true.
+Each gate has three fields: `metric` (what gets measured), `threshold` (the value to compare against), and `operator` (which direction the comparison runs). A gate passes when `metric <operator> threshold` is true.
 
-Here is a full breakdown of every gate:
+Here's what each of the six gates actually does:
 
----
+`test_coverage` checks `coverage_pct >= 95`. The sample data ships with 81.4%, so this gate fails out of the box. Lower the threshold to `80` in `quality-gates.json` and it passes — no code change required, which is the whole point of the architecture.
 
-**`test_coverage` — Unit Test Coverage**
-- Metric: `coverage_pct` — percentage of lines covered by unit tests
-- Default threshold: `95` with operator `>=`
-- Passes when coverage is **at or above** the threshold
-- Allowable values: any integer 0–100. The sample data ships with `coverage_pct: 81.4`, so this gate **fails** by default — try lowering the threshold to `80` to see it pass
-- `rollback_trigger: false` — failing this gate blocks the deploy but does not trigger a post-deploy rollback recommendation
+`coverage_branch` checks `coverage_branch_pct >= 80`. This measures if/else paths exercised by tests, not just lines — it's a stricter bar than line coverage, so the threshold is set lower.
 
-**`coverage_branch` — Branch Coverage**
-- Metric: `coverage_branch_pct` — percentage of code branches (if/else paths) exercised by tests
-- Default threshold: `80` with operator `>=`
-- Allowable values: any integer 0–100. Branch coverage is stricter than line coverage and intentionally set lower
+`sast_findings` is the one you asked about. It checks `security_scan.high <= 0` — zero HIGH-severity findings allowed, period. Even one finding blocks the deploy. The sample data has `"high": 1`, so it fails deliberately — that's by design for the exercise. Set the threshold to `1` if you want to see it pass, but keep it at `0` in any real production gate. This is also one of the two `rollback_trigger` gates, so if it fires post-deploy, `monitor.py` escalates.
 
-**`sast_findings` — SAST High-Severity Findings**
-- Metric: `security_scan.high` — the **count** of HIGH-severity findings from the security scanner
-- Default threshold: `0` with operator `<=`
-- Meaning: zero HIGH findings are allowed. Even a single finding fails the gate
-- The sample data has `"high": 1`, so this gate **fails out of the box** — that is intentional for the exercise
-- Allowable values: any non-negative integer. Set to `1` to permit one finding through, `2` to permit two, and so on. In real production, keep this at `0`
-- `rollback_trigger: true` — one of only two rollback-trigger gates. If this fires after deploy, `monitor.py` will escalate for human approval
+`lighthouse_score` checks `lighthouse_score >= 85`. The sample data has 91, so this one passes cleanly.
 
-**`lighthouse_score` — Lighthouse Performance Score**
-- Metric: `lighthouse_score` — Google Lighthouse score for the checkout frontend (0–100 scale)
-- Default threshold: `85` with operator `>=`
-- Allowable values: any integer 0–100. Scores in real projects typically range 40–100; 85 is a fairly strict bar for a production checkout page
+`latency_p95_delta` checks `latency_p95_delta_pct <= 10` — that's a percentage increase in P95 latency vs the previous deploy, not an absolute millisecond value. The sample data has 18.4%, so it fails and is what drives the rollback decision in `monitor.py`. This is the other `rollback_trigger` gate.
 
-**`latency_p95_delta` — P95 Latency Regression**
-- Metric: `latency_p95_delta_pct` — the **percentage increase** in P95 latency compared to the previous deployment. This is a delta, not an absolute millisecond value
-- Default threshold: `10` with operator `<=`
-- Meaning: P95 latency may increase by at most 10%. Set to `0` to require P95 to be the same or better; set to `20` to allow a larger regression through
-- The mock rollback response in `monitor.py` deliberately uses `18.4%` to trigger this gate
-- `rollback_trigger: true` — this and `sast_findings` are the only two gates that feed the post-deploy rollback monitor
+`cost_per_request_delta` checks `cost_per_request_delta_pct <= 10`. Same delta-percentage pattern as latency. Sample data has 3.2%, so it passes.
 
-**`cost_per_request_delta` — Cost Per Request Regression**
-- Metric: `cost_per_request_delta_pct` — percentage increase in compute cost per request vs the previous deploy
-- Default threshold: `10` with operator `<=`
-- Allowable values: any non-negative number. Same delta-percentage pattern as latency
+The `operator` field only ever takes `>=` (coverage and Lighthouse — higher is better) or `<=` (findings count and deltas — lower is better).
 
----
+Both `triage_agent.py` and `monitor.py` read `quality-gates.json` at runtime. `monitor.py` loads only the two rollback-trigger gates. `triage_agent.py` loads all six and passes them to Claude as data alongside the pipeline results — that's the config-driven architecture the module is built around. Edit the JSON, the gate behaviour changes, no Python touched.
 
-**The `operator` field** only takes two values across all gates:
-- `>=` — passes if the measured value is **at or above** the threshold (used for coverage and Lighthouse)
-- `<=` — passes if the measured value is **at or below** the threshold (used for findings count, latency delta, cost delta)
+One thing worth knowing: the `MOCK_RESPONSE` in `triage_agent.py` shows `coverage: 74.1%`, which is a hand-crafted scenario. The actual `sample_data.json` has `coverage_pct: 81.4`. They're intentionally different — two distinct gate scenarios to illustrate different outcomes.
 
-**Which script reads quality-gates.json?**
+A good sequence to try:
 
-Only **`monitor.py`** (the post-deploy rollback watchdog) reads `quality-gates.json` at runtime, and it only loads the two gates where `rollback_trigger` is `true` (`sast_findings` and `latency_p95_delta`). Changing thresholds in `quality-gates.json` will affect `monitor.py` output only.
-
-`triage_agent.py` does **not** read `quality-gates.json` — it loads `sample_data.json` directly and the gate thresholds are embedded in its `SYSTEM_PROMPT`. Editing `quality-gates.json` has no effect when running `triage_agent.py`.
-
-**A note on mock vs live values**
-
-The `MOCK_RESPONSE` in `triage_agent.py` shows `coverage: 74.1%` — this is a hand-crafted illustrative scenario, not a reflection of `sample_data.json` (which has `coverage_pct: 81.4`). In live mode the agent evaluates the actual sample data, which is a different scenario from the mock.
-
-**A good experiment sequence (using monitor.py):**
-
-1. Run `python module5/monitor.py --mock` — see the pre-built rollback scenario (18.4% P95 latency, exceeds the 10% threshold)
-2. Set `latency_p95_delta.threshold` to `20` — the latency gate now passes; observe the rollback recommendation disappear
-3. Set `latency_p95_delta.threshold` to `5` — tighten the bar; the gate fires sooner
-4. Set `cost_per_request_delta.rollback_trigger` to `true` — this gate now feeds the monitor alongside the two that already fire
-5. Set `sast_findings.threshold` to `1` — the security gate now permits one HIGH finding through
+1. `python module5/triage_agent.py --mock` — see the APPROVE_WITH_CONDITIONS scenario
+2. Set `test_coverage.threshold` to `70` in `quality-gates.json` and run live — the coverage gate now passes, watch the decision shift
+3. `python module5/monitor.py --mock` — see the rollback scenario triggered by 18.4% P95 latency
+4. Set `latency_p95_delta.threshold` to `20` — latency gate passes, rollback recommendation disappears
+5. Set `sast_findings.threshold` to `1` — security gate now lets one HIGH finding through
 
 ---
 
