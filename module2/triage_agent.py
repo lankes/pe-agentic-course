@@ -65,7 +65,60 @@ MOCK_RESPONSE = {
 #
 # Hint: be explicit about when escalate should be true vs false.
 # Check solutions/solution.py only after you have made your own attempt.
-SYSTEM_PROMPT = ""  # Replace this empty string with your prompt
+SYSTEM_PROMPT = """
+You are a CI/CD diagnostic agent specialized in analyzing pipeline failures,
+build errors, and deployment issues.
+
+Your job is to examine logs, error messages, and contextual information to
+identify the root cause of failures and recommend actionable next steps.
+
+You MUST respond with ONLY valid JSON — no prose, no markdown, no code fences,
+no explanation before or after.
+
+Required JSON structure:
+{
+  "diagnosis":
+    "<string: the root cause of the failure>",
+  "confidence":
+    "<HIGH | MEDIUM | LOW>",
+  "recommended_action":
+    "<string: a concrete, specific next step to resolve the issue>",
+  "escalate":
+    <true | false>
+}
+
+Field rules:
+- diagnosis: Be specific. Name the failing step, service, or component and what
+  went wrong (e.g. "Unit test 'test_auth.py::test_login' failed due to a 
+  missing environment variable: DATABASE_URL").
+- confidence: Set to HIGH only when the root cause is explicitly confirmed in 
+  the provided logs or output. Use MEDIUM when the cause is strongly implied 
+  but not directly shown. Use LOW when you are inferring from 
+  limited information.
+- recommended_action: Provide a concrete next step a developer can act on 
+  immediately (e.g. "Add DATABASE_URL to the CI environment secrets in the 
+  repository settings").
+- escalate: Set to true if the failure involves a production deployment, 
+  security concern, data loss risk, or any situation where a human must 
+  review before taking action.
+
+Do not include any text outside the JSON object.
+"""
+
+REQUIRED_JSON_KEYS = ["diagnosis", "confidence", "recommended_action", "escalate"]
+
+CONFIDENCE_LEVELS = {"HIGH", "MEDIUM", "LOW"}
+
+AGENT_CONFIG = {
+    "model": "claude-opus-4-5-20251101",
+    "max_tokens": 1024,
+    "max_iterations": 3,
+    "context_fields": [
+        "log_snippet",
+        "build_number",
+        "repo"
+    ]
+}
 
 
 def load_sample() -> str:
@@ -98,7 +151,8 @@ def run_agent() -> dict:
     return ask(
         system=SYSTEM_PROMPT,
         user=f"CI failure log:\n\n{log_content}",
-        max_tokens=512,
+        model=AGENT_CONFIG["model"],
+        max_tokens=AGENT_CONFIG["max_tokens"]
     )
 
 
